@@ -9,7 +9,9 @@
     1. Script Include  : SuperPromptProcessor
     2. Catalog Item    : AI Super Prompt Executor  (sc_cat_item)
     3. Variable        : v_json_payload             (item_option_new)
-    4. Flow            : AI Super Prompt Executor Flow (sys_hub_flow)
+    4. Variable        : v_table_schema             (item_option_new, optional)
+    5. Variable        : v_existing_records_xml     (item_option_new, optional)
+    6. Flow            : AI Super Prompt Executor Flow (sys_hub_flow)
 
   Import Instructions:
     1. Log in to your ServiceNow instance as an administrator.
@@ -18,7 +20,7 @@
     4. Upload this file and click  Upload.
     5. Open the newly created update set and click  Preview Update Set.
     6. Resolve any conflicts, then click  Commit Update Set.
-    7. Verify the four records were created / updated successfully.
+    7. Verify the six records were created / updated successfully.
 
   Post-Import Steps:
     a. Assign the "AI Super Prompt Executor" catalog item to the correct
@@ -41,7 +43,8 @@
     <client_callable>false</client_callable>
     <description>Parses an AI-generated JSON payload and performs the
 requested ServiceNow administrative action (create/update variables,
-catalog items, or users).  Called from the AI Super Prompt Executor Flow.</description>
+catalog items, users, records, business rules, script includes, and
+client scripts).  Called from the AI Super Prompt Executor Flow.</description>
     <name>SuperPromptProcessor</name>
     <script><![CDATA[
 /**
@@ -59,6 +62,11 @@ catalog items, or users).  Called from the AI Super Prompt Executor Flow.</descr
  *   - update_catalog_item  : Updates fields on a Catalog Item record
  *   - create_user          : Creates a new sys_user record
  *   - update_user          : Updates fields on an existing sys_user record
+ *   - create_record        : Creates a new record in any table
+ *   - update_record        : Updates an existing record in any table
+ *   - create_business_rule : Creates a new Business Rule (sys_script)
+ *   - create_script_include: Creates a new Script Include (sys_script_include)
+ *   - create_client_script : Creates a new Client Script (sys_script_client)
  *
  * @param {string} jsonInput  - Raw JSON string from the catalog variable
  *                              v_json_payload.
@@ -126,10 +134,27 @@ SuperPromptProcessor.prototype = {
             case 'update_user':
                 result = this._updateUser(data);
                 break;
+            case 'create_record':
+                result = this._createRecord(data);
+                break;
+            case 'update_record':
+                result = this._updateRecord(data);
+                break;
+            case 'create_business_rule':
+                result = this._createBusinessRule(data);
+                break;
+            case 'create_script_include':
+                result = this._createScriptInclude(data);
+                break;
+            case 'create_client_script':
+                result = this._createClientScript(data);
+                break;
             default:
                 result.message = 'Unknown action: "' + action + '". ' +
                     'Supported actions: create_variable, update_variable, ' +
-                    'update_catalog_item, create_user, update_user.';
+                    'update_catalog_item, create_user, update_user, ' +
+                    'create_record, update_record, create_business_rule, ' +
+                    'create_script_include, create_client_script.';
         }
 
         // Always add the AI-generated worknote summary (or the error message)
@@ -323,6 +348,249 @@ SuperPromptProcessor.prototype = {
         };
     },
 
+    /**
+     * Creates a new record in any table specified by operation_details.target_table.
+     * All fields to set are supplied in data.payload.
+     */
+    _createRecord: function (data) {
+        var tableName = data.operation_details.target_table;
+        if (!tableName) {
+            return {
+                success: false,
+                message: 'operation_details.target_table is required for create_record.'
+            };
+        }
+
+        var gr = new GlideRecord(tableName);
+        gr.initialize();
+        this._applyPayload(gr, data.payload);
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create record in table "' + tableName +
+                    '" for "' + data.context.target_record_name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Record created successfully in table "' + tableName +
+                '" (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
+    /**
+     * Updates an existing record in any table specified by
+     * operation_details.target_table.
+     *
+     * Record lookup priority:
+     *   1. context.sys_id       – direct lookup by sys_id
+     *   2. context.lookup_field + context.lookup_value – lookup by arbitrary field
+     */
+    _updateRecord: function (data) {
+        var tableName = data.operation_details.target_table;
+        if (!tableName) {
+            return {
+                success: false,
+                message: 'operation_details.target_table is required for update_record.'
+            };
+        }
+
+        var gr = new GlideRecord(tableName);
+
+        if (data.context.sys_id) {
+            if (!gr.get(data.context.sys_id)) {
+                return {
+                    success: false,
+                    message: 'Record not found in table "' + tableName +
+                        '" with sys_id "' + data.context.sys_id + '".'
+                };
+            }
+        } else if (data.context.lookup_field && data.context.lookup_value !== undefined) {
+            gr.addQuery(data.context.lookup_field, data.context.lookup_value);
+            gr.setLimit(1);
+            gr.query();
+            if (!gr.next()) {
+                return {
+                    success: false,
+                    message: 'Record not found in table "' + tableName +
+                        '" where ' + data.context.lookup_field +
+                        ' = "' + data.context.lookup_value + '".'
+                };
+            }
+        } else {
+            return {
+                success: false,
+                message: 'context.sys_id or (context.lookup_field and ' +
+                    'context.lookup_value) is required to identify the record ' +
+                    'to update in table "' + tableName + '".'
+            };
+        }
+
+        this._applyPayload(gr, data.payload);
+        gr.update();
+
+        return {
+            success: true,
+            message: 'Record "' + data.context.target_record_name +
+                '" updated successfully in table "' + tableName + '".'
+        };
+    },
+
+    /**
+     * Creates a new Business Rule record (sys_script).
+     *
+     * Required payload fields: name, table_name, when, script
+     * Optional payload fields: action, active, order, filter_condition,
+     *                          description, advanced
+     */
+    _createBusinessRule: function (data) {
+        var payload = data.payload || {};
+        if (!payload.name) {
+            return { success: false, message: 'payload.name is required for create_business_rule.' };
+        }
+        if (!payload.table_name) {
+            return { success: false, message: 'payload.table_name is required for create_business_rule.' };
+        }
+        if (!payload.when) {
+            return { success: false, message: 'payload.when is required for create_business_rule (before/after/async/display).' };
+        }
+        if (!payload.script) {
+            return { success: false, message: 'payload.script is required for create_business_rule.' };
+        }
+
+        var gr = new GlideRecord('sys_script');
+        gr.initialize();
+        this._applyPayload(gr, payload);
+
+        // Default active to true if not specified
+        if (payload.active === undefined) {
+            gr.setValue('active', true);
+        }
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create Business Rule "' + payload.name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Business Rule "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
+    /**
+     * Creates a new Script Include record (sys_script_include).
+     *
+     * Required payload fields: name, script
+     * Optional payload fields: api_name, active, access, description, caller_access
+     */
+    _createScriptInclude: function (data) {
+        var payload = data.payload || {};
+        if (!payload.name) {
+            return { success: false, message: 'payload.name is required for create_script_include.' };
+        }
+        if (!payload.script) {
+            return { success: false, message: 'payload.script is required for create_script_include.' };
+        }
+
+        var gr = new GlideRecord('sys_script_include');
+        gr.initialize();
+        this._applyPayload(gr, payload);
+
+        // Default api_name to global.<name> convention if not supplied
+        if (!payload.api_name) {
+            gr.setValue('api_name', 'global.' + payload.name);
+        }
+
+        // Default active to true if not specified
+        if (payload.active === undefined) {
+            gr.setValue('active', true);
+        }
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create Script Include "' + payload.name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Script Include "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
+    /**
+     * Creates a new Client Script record (sys_script_client).
+     *
+     * Required payload fields: name, table, type, script
+     * Optional payload fields: active, field_name (onChange/onCellEdit),
+     *                          description, applies_to
+     */
+    _createClientScript: function (data) {
+        var payload = data.payload || {};
+        if (!payload.name) {
+            return { success: false, message: 'payload.name is required for create_client_script.' };
+        }
+        if (!payload.table) {
+            return { success: false, message: 'payload.table is required for create_client_script.' };
+        }
+        if (!payload.type) {
+            return { success: false, message: 'payload.type is required for create_client_script (onLoad/onSubmit/onChange/onCellEdit).' };
+        }
+        if (!payload.script) {
+            return { success: false, message: 'payload.script is required for create_client_script.' };
+        }
+
+        var validTypes = ['onLoad', 'onSubmit', 'onChange', 'onCellEdit'];
+        if (validTypes.indexOf(payload.type) === -1) {
+            return {
+                success: false,
+                message: 'Invalid payload.type "' + payload.type + '". Must be one of: ' + validTypes.join(', ') + '.'
+            };
+        }
+
+        if ((payload.type === 'onChange' || payload.type === 'onCellEdit') && !payload.field_name) {
+            return {
+                success: false,
+                message: 'payload.field_name is required when payload.type is "' + payload.type + '".'
+            };
+        }
+
+        var gr = new GlideRecord('sys_script_client');
+        gr.initialize();
+        this._applyPayload(gr, payload);
+
+        // Default active to true if not specified
+        if (payload.active === undefined) {
+            gr.setValue('active', true);
+        }
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create Client Script "' + payload.name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Client Script "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
     // -------------------------------------------------------------------------
     // Helper Methods
     // -------------------------------------------------------------------------
@@ -431,7 +699,11 @@ that was generated by the <em>AI Super Prompt</em>.</p>
   <li>Open your AI chatbot (Copilot, ChatGPT, Gemini, etc.).</li>
   <li>Paste the contents of <code>super_prompt.txt</code> to initialise the assistant.</li>
   <li>Describe the ServiceNow change you need (e.g. "Create a mandatory text
-      variable called 'Cost Centre' on the 'New Laptop Request' catalog item").</li>
+      variable called 'Cost Centre' on the 'New Laptop Request' catalog item",
+      or "Create a record in our custom table u_project").</li>
+  <li>For generic table operations the AI will ask you to paste the table's
+      field dictionary and/or existing records as XML — use the optional fields
+      below to provide that context.</li>
   <li>Copy the JSON output produced by the AI.</li>
   <li>Paste it into the <strong>JSON Payload</strong> field below and submit.</li>
 </ol>
@@ -447,7 +719,7 @@ a summary of what was done.</p>
   </sc_cat_item>
 
   <!-- =========================================================
-       3.  Variable: v_json_payload  (Multi-line Text)
+       3.  Variable: v_json_payload  (Multi-line Text, mandatory)
        ========================================================= -->
   <item_option_new action="INSERT_OR_UPDATE">
     <active>true</active>
@@ -466,7 +738,56 @@ Do not modify the JSON — submit it exactly as produced by the AI.]]></help_tag
   </item_option_new>
 
   <!-- =========================================================
-       4.  Flow: AI Super Prompt Executor Flow
+       4.  Variable: v_table_schema  (Multi-line Text, optional)
+       ========================================================= -->
+  <item_option_new action="INSERT_OR_UPDATE">
+    <active>true</active>
+    <cat_item display_value="AI Super Prompt Executor"/>
+    <help_tag><![CDATA[Optional. Paste the table's field dictionary XML (or a plain list of
+field names and types) here so the AI can verify field names and identify
+required fields.
+
+To export from ServiceNow:
+  System Definition › Tables & Columns › [your table] › Show Dictionary
+Then right-click the list header and choose Export › XML.]]></help_tag>
+    <label>Table Schema (optional)</label>
+    <mandatory>false</mandatory>
+    <name>v_table_schema</name>
+    <order>200</order>
+    <question_text>Target Table Schema / Field Dictionary (optional)</question_text>
+    <type>8</type>
+    <!-- type 8 = Multi-line Text -->
+    <sys_class_name>item_option_new</sys_class_name>
+    <sys_name>v_table_schema</sys_name>
+  </item_option_new>
+
+  <!-- =========================================================
+       5.  Variable: v_existing_records_xml  (Multi-line Text, optional)
+       ========================================================= -->
+  <item_option_new action="INSERT_OR_UPDATE">
+    <active>true</active>
+    <cat_item display_value="AI Super Prompt Executor"/>
+    <help_tag><![CDATA[Optional. Paste one or more existing records from the target table
+exported as XML. The AI uses these records as a reference to understand the
+correct data format and field values.
+
+To export from ServiceNow:
+  1. Open the target table list view.
+  2. Right-click any row header.
+  3. Choose Export › XML.]]></help_tag>
+    <label>Existing Records XML (optional)</label>
+    <mandatory>false</mandatory>
+    <name>v_existing_records_xml</name>
+    <order>300</order>
+    <question_text>Existing Records XML for AI reference (optional)</question_text>
+    <type>8</type>
+    <!-- type 8 = Multi-line Text -->
+    <sys_class_name>item_option_new</sys_class_name>
+    <sys_name>v_existing_records_xml</sys_name>
+  </item_option_new>
+
+  <!-- =========================================================
+       6.  Flow: AI Super Prompt Executor Flow
        ========================================================= -->
   <sys_hub_flow action="INSERT_OR_UPDATE">
     <access>public</access>
