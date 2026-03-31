@@ -19,12 +19,18 @@
  *   - create_script_include: Creates a new Script Include (sys_script_include)
  *   - create_client_script : Creates a new Client Script (sys_script_client)
  *
+ * Batch mode:
+ *   Pass an "operations" array at the top level to process multiple records in
+ *   a single submission.  Each element must be a full single-operation object.
+ *   A top-level "worknote_summary" overrides the per-operation summaries.
+ *
  * Worknote enrichment:
  *   After every action the RITM work note receives:
  *     - The AI-generated summary
- *     - A "Records Affected" block with a direct link to the record and its
- *       application scope.  For existing records the scope is read from the
- *       record itself; for new records it is taken from the optional
+ *     - A "Records Affected" table listing every record created or modified,
+ *       each with a direct link and its application scope.
+ *     - For existing records the scope is read from the record itself.
+ *     - For new records the scope is taken from the optional
  *       operation_details.scope field in the JSON payload.
  *
  * @param {string} jsonInput  - Raw JSON string from the catalog variable
@@ -45,81 +51,139 @@ SuperPromptProcessor.prototype = {
      * Entry point.  Parses the JSON string and dispatches to the correct
      * handler method.
      *
+     * Supports two JSON formats:
+     *   1. Single-operation  – the existing top-level schema.
+     *   2. Batch mode        – a top-level "operations" array, each element
+     *      being a full single-operation object.  An optional top-level
+     *      "worknote_summary" provides the overall summary line.
+     *
      * @param {string}       jsonInput - Raw JSON string.
      * @param {GlideRecord}  ritmGr    - RITM record for worknote updates.
      * @returns {object} result - { success: boolean, message: string }
      */
     process: function (jsonInput, ritmGr) {
-        var result = { success: false, message: '' };
+        var earlyError = { success: false, message: '' };
 
         if (!jsonInput || jsonInput.trim() === '') {
-            result.message = 'No JSON payload provided.';
-            this._addWorknote(ritmGr, 'ERROR: ' + result.message);
-            return result;
+            earlyError.message = 'No JSON payload provided.';
+            this._addWorknote(ritmGr, 'ERROR: ' + earlyError.message);
+            return earlyError;
         }
 
         var data;
         try {
             data = JSON.parse(jsonInput);
         } catch (e) {
-            result.message = 'Invalid JSON payload: ' + e.message;
-            this._addWorknote(ritmGr, 'ERROR: ' + result.message);
-            return result;
+            earlyError.message = 'Invalid JSON payload: ' + e.message;
+            this._addWorknote(ritmGr, 'ERROR: ' + earlyError.message);
+            return earlyError;
         }
 
-        // Validate top-level required keys
+        // ---- Batch mode: top-level "operations" array ----------------------
+        if (data.operations && Array.isArray(data.operations)) {
+            return this._processBatch(data, ritmGr);
+        }
+
+        // ---- Single-operation mode -----------------------------------------
         var validationError = this._validateSchema(data);
         if (validationError) {
-            result.message = validationError;
-            this._addWorknote(ritmGr, 'ERROR: ' + result.message);
-            return result;
+            earlyError.message = validationError;
+            this._addWorknote(ritmGr, 'ERROR: ' + earlyError.message);
+            return earlyError;
         }
 
-        var action = data.operation_details.action;
+        var result = this._dispatchAction(data);
 
-        switch (action) {
-            case 'create_variable':
-                result = this._createVariable(data);
-                break;
-            case 'update_variable':
-                result = this._updateVariable(data);
-                break;
-            case 'update_catalog_item':
-                result = this._updateCatalogItem(data);
-                break;
-            case 'create_user':
-                result = this._createUser(data);
-                break;
-            case 'update_user':
-                result = this._updateUser(data);
-                break;
-            case 'create_record':
-                result = this._createRecord(data);
-                break;
-            case 'update_record':
-                result = this._updateRecord(data);
-                break;
-            case 'create_business_rule':
-                result = this._createBusinessRule(data);
-                break;
-            case 'create_script_include':
-                result = this._createScriptInclude(data);
-                break;
-            case 'create_client_script':
-                result = this._createClientScript(data);
-                break;
-            default:
-                result.message = 'Unknown action: "' + action + '". ' +
-                    'Supported actions: create_variable, update_variable, ' +
-                    'update_catalog_item, create_user, update_user, ' +
-                    'create_record, update_record, create_business_rule, ' +
-                    'create_script_include, create_client_script.';
-        }
-
-        // Build and add the enriched worknote (summary + record link + scope)
-        this._addWorknote(ritmGr, this._buildWorknote(data, result));
+        // Build and add the enriched worknote (summary + record links + scope)
+        this._addWorknote(ritmGr, this._buildWorknote(data, [result]));
 
         return result;
+    },
+
+    /**
+     * Processes a batch payload containing an "operations" array.
+     * Each element is validated and dispatched individually; all results are
+     * collected and written as a single enriched worknote.
+     *
+     * @param {object}      data   - Parsed top-level JSON object.
+     * @param {GlideRecord} ritmGr - RITM record for worknote updates.
+     * @returns {object} { success: boolean, message: string }
+     */
+    _processBatch: function (data, ritmGr) {
+        var results = [];
+        var messages = [];
+
+        for (var i = 0; i < data.operations.length; i++) {
+            var opData = data.operations[i];
+            var opValidationError = this._validateSchema(opData);
+            if (opValidationError) {
+                var errResult = {
+                    success: false,
+                    message: 'Operation ' + (i + 1) + ': ' + opValidationError,
+                    _opData: opData
+                };
+                results.push(errResult);
+                messages.push(errResult.message);
+                continue;
+            }
+
+            var opResult = this._dispatchAction(opData);
+            opResult._opData = opData;
+            results.push(opResult);
+            messages.push(opResult.message);
+        }
+
+        this._addWorknote(ritmGr, this._buildWorknote(data, results));
+
+        var allSucceeded = true;
+        for (var j = 0; j < results.length; j++) {
+            if (!results[j].success) {
+                allSucceeded = false;
+                break;
+            }
+        }
+        return { success: allSucceeded, message: messages.join(' | ') };
+    },
+
+    /**
+     * Dispatches a single validated operation object to the correct handler.
+     *
+     * @param {object} data - Single-operation parsed JSON.
+     * @returns {object} result from the handler.
+     */
+    _dispatchAction: function (data) {
+        var action = data.operation_details.action;
+        switch (action) {
+            case 'create_variable':
+                return this._createVariable(data);
+            case 'update_variable':
+                return this._updateVariable(data);
+            case 'update_catalog_item':
+                return this._updateCatalogItem(data);
+            case 'create_user':
+                return this._createUser(data);
+            case 'update_user':
+                return this._updateUser(data);
+            case 'create_record':
+                return this._createRecord(data);
+            case 'update_record':
+                return this._updateRecord(data);
+            case 'create_business_rule':
+                return this._createBusinessRule(data);
+            case 'create_script_include':
+                return this._createScriptInclude(data);
+            case 'create_client_script':
+                return this._createClientScript(data);
+            default:
+                return {
+                    success: false,
+                    message: 'Unknown action: "' + action + '". ' +
+                        'Supported actions: create_variable, update_variable, ' +
+                        'update_catalog_item, create_user, update_user, ' +
+                        'create_record, update_record, create_business_rule, ' +
+                        'create_script_include, create_client_script.'
+                };
+        }
     },
 
     // -------------------------------------------------------------------------
@@ -694,30 +758,94 @@ SuperPromptProcessor.prototype = {
     },
 
     /**
-     * Builds the full work-note text: AI summary + Records Affected block
-     * (record link + scope).
+     * Builds the full work-note text: overall summary + a "Records Affected"
+     * workflow listing every record that was created or modified, each with a
+     * direct instance link and its application scope.
      *
-     * @param {object} data   - Parsed JSON payload.
-     * @param {object} result - Result from the action handler.
+     * @param {object}   data    - Parsed top-level JSON (single-op or batch).
+     * @param {object[]} results - Array of result objects from action handlers.
+     *                            Each result may include sys_id, table, scope,
+     *                            and a _opData back-reference to its operation.
      * @returns {string}
      */
-    _buildWorknote: function (data, result) {
+    _buildWorknote: function (data, results) {
         var lines = [];
-        lines.push(result.success
-            ? data.worknote_summary
-            : 'ERROR: ' + result.message);
 
-        if (result.success && result.sys_id && result.table) {
-            var instanceUrl = (gs.getProperty('glide.servlet.uri') || '').replace(/\/$/, '');
-            var recordUrl = instanceUrl + '/' + result.table + '.do?sys_id=' + result.sys_id;
+        // ---- Summary line ---------------------------------------------------
+        // Use top-level worknote_summary if present (covers both single-op and
+        // batch); fall back to the first result's message for single-op errors.
+        if (data.worknote_summary) {
+            lines.push(data.worknote_summary);
+        } else if (results.length === 1) {
+            lines.push(results[0].success
+                ? results[0].message
+                : 'ERROR: ' + results[0].message);
+        } else {
+            var successCount = 0;
+            for (var k = 0; k < results.length; k++) {
+                if (results[k].success) { successCount++; }
+            }
+            lines.push('Batch: ' + successCount + ' of ' + results.length +
+                ' operation(s) completed successfully.');
+        }
+
+        // ---- Records Affected block ----------------------------------------
+        var instanceUrl = (gs.getProperty('glide.servlet.uri') || '').replace(/\/$/, '');
+        var affected = [];
+        for (var i = 0; i < results.length; i++) {
+            if (results[i].sys_id && results[i].table) {
+                affected.push(results[i]);
+            }
+        }
+
+        if (affected.length > 0) {
             lines.push('');
-            lines.push('Records Affected');
+            lines.push('Records Affected (' + affected.length + ')');
+            lines.push('============================================');
+
+            for (var j = 0; j < affected.length; j++) {
+                var res = affected[j];
+                var opData = res._opData || data;
+                var recordUrl = instanceUrl + '/' + res.table +
+                    '.do?sys_id=' + res.sys_id;
+
+                if (j > 0) {
+                    lines.push('  --------------------------------------------');
+                }
+                lines.push('  [' + (j + 1) + '] Action : ' +
+                    (opData.operation_details
+                        ? opData.operation_details.action
+                        : ''));
+                lines.push('      Record : ' +
+                    (opData.context
+                        ? opData.context.target_record_name
+                        : ''));
+                lines.push('      Table  : ' + res.table);
+                lines.push('      Scope  : ' + (res.scope || 'global'));
+                lines.push('      Link   : ' + recordUrl);
+            }
+
+            lines.push('============================================');
+        }
+
+        // ---- Per-result error details for failures -------------------------
+        var errors = [];
+        for (var m = 0; m < results.length; m++) {
+            if (!results[m].success) {
+                var errOpData = results[m]._opData || data;
+                var errLabel = errOpData.context
+                    ? errOpData.context.target_record_name
+                    : ('Operation ' + (m + 1));
+                errors.push('  [' + errLabel + '] ' + results[m].message);
+            }
+        }
+        if (errors.length > 0) {
+            lines.push('');
+            lines.push('Errors');
             lines.push('--------------------------------------------');
-            lines.push('  Action : ' + data.operation_details.action);
-            lines.push('  Record : ' + data.context.target_record_name);
-            lines.push('  Table  : ' + result.table);
-            lines.push('  Scope  : ' + (result.scope || 'global'));
-            lines.push('  Link   : ' + recordUrl);
+            for (var n = 0; n < errors.length; n++) {
+                lines.push(errors[n]);
+            }
             lines.push('--------------------------------------------');
         }
 
