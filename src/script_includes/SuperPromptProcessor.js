@@ -15,6 +15,9 @@
  *   - update_user          : Updates fields on an existing sys_user record
  *   - create_record        : Creates a new record in any table
  *   - update_record        : Updates an existing record in any table
+ *   - create_business_rule : Creates a new Business Rule (sys_script)
+ *   - create_script_include: Creates a new Script Include (sys_script_include)
+ *   - create_client_script : Creates a new Client Script (sys_script_client)
  *
  * @param {string} jsonInput  - Raw JSON string from the catalog variable
  *                              v_json_payload.
@@ -88,11 +91,21 @@ SuperPromptProcessor.prototype = {
             case 'update_record':
                 result = this._updateRecord(data);
                 break;
+            case 'create_business_rule':
+                result = this._createBusinessRule(data);
+                break;
+            case 'create_script_include':
+                result = this._createScriptInclude(data);
+                break;
+            case 'create_client_script':
+                result = this._createClientScript(data);
+                break;
             default:
                 result.message = 'Unknown action: "' + action + '". ' +
                     'Supported actions: create_variable, update_variable, ' +
                     'update_catalog_item, create_user, update_user, ' +
-                    'create_record, update_record.';
+                    'create_record, update_record, create_business_rule, ' +
+                    'create_script_include, create_client_script.';
         }
 
         // Always add the AI-generated worknote summary (or the error message)
@@ -375,6 +388,157 @@ SuperPromptProcessor.prototype = {
             success: true,
             message: 'Record "' + data.context.target_record_name +
                 '" updated successfully in table "' + tableName + '".'
+        };
+    },
+
+    /**
+     * Creates a new Business Rule record (sys_script).
+     *
+     * Required payload fields: name, table_name, when, script
+     * Optional payload fields: action, active, order, filter_condition,
+     *                          description, advanced
+     */
+    _createBusinessRule: function (data) {
+        var payload = data.payload || {};
+        if (!payload.name) {
+            return { success: false, message: 'payload.name is required for create_business_rule.' };
+        }
+        if (!payload.table_name) {
+            return { success: false, message: 'payload.table_name is required for create_business_rule.' };
+        }
+        if (!payload.when) {
+            return { success: false, message: 'payload.when is required for create_business_rule (before/after/async/display).' };
+        }
+        if (!payload.script) {
+            return { success: false, message: 'payload.script is required for create_business_rule.' };
+        }
+
+        var gr = new GlideRecord('sys_script');
+        gr.initialize();
+        this._applyPayload(gr, payload);
+
+        // Default active to true if not specified
+        if (payload.active === undefined) {
+            gr.setValue('active', true);
+        }
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create Business Rule "' + payload.name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Business Rule "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
+    /**
+     * Creates a new Script Include record (sys_script_include).
+     *
+     * Required payload fields: name, script
+     * Optional payload fields: api_name, active, access, description, caller_access
+     */
+    _createScriptInclude: function (data) {
+        var payload = data.payload || {};
+        if (!payload.name) {
+            return { success: false, message: 'payload.name is required for create_script_include.' };
+        }
+        if (!payload.script) {
+            return { success: false, message: 'payload.script is required for create_script_include.' };
+        }
+
+        var gr = new GlideRecord('sys_script_include');
+        gr.initialize();
+        this._applyPayload(gr, payload);
+
+        // Default api_name to global.<name> convention if not supplied
+        if (!payload.api_name) {
+            gr.setValue('api_name', 'global.' + payload.name);
+        }
+
+        // Default active to true if not specified
+        if (payload.active === undefined) {
+            gr.setValue('active', true);
+        }
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create Script Include "' + payload.name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Script Include "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
+    /**
+     * Creates a new Client Script record (sys_script_client).
+     *
+     * Required payload fields: name, table, type, script
+     * Optional payload fields: active, field_name (onChange/onCellEdit),
+     *                          description, applies_to
+     */
+    _createClientScript: function (data) {
+        var payload = data.payload || {};
+        if (!payload.name) {
+            return { success: false, message: 'payload.name is required for create_client_script.' };
+        }
+        if (!payload.table) {
+            return { success: false, message: 'payload.table is required for create_client_script.' };
+        }
+        if (!payload.type) {
+            return { success: false, message: 'payload.type is required for create_client_script (onLoad/onSubmit/onChange/onCellEdit).' };
+        }
+        if (!payload.script) {
+            return { success: false, message: 'payload.script is required for create_client_script.' };
+        }
+
+        var validTypes = ['onLoad', 'onSubmit', 'onChange', 'onCellEdit'];
+        if (validTypes.indexOf(payload.type) === -1) {
+            return {
+                success: false,
+                message: 'Invalid payload.type "' + payload.type + '". Must be one of: ' + validTypes.join(', ') + '.'
+            };
+        }
+
+        if ((payload.type === 'onChange' || payload.type === 'onCellEdit') && !payload.field_name) {
+            return {
+                success: false,
+                message: 'payload.field_name is required when payload.type is "' + payload.type + '".'
+            };
+        }
+
+        var gr = new GlideRecord('sys_script_client');
+        gr.initialize();
+        this._applyPayload(gr, payload);
+
+        // Default active to true if not specified
+        if (payload.active === undefined) {
+            gr.setValue('active', true);
+        }
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create Client Script "' + payload.name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Client Script "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
+            sys_id: sysId
         };
     },
 
