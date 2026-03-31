@@ -36,8 +36,11 @@ automatically performs the requested change and adds a work note to the RITM.
 │    ├─ update_catalog_item  → sc_cat_item                         │
 │    ├─ create_user          → sys_user                            │
 │    ├─ update_user          → sys_user                            │
-│    ├─ create_record        → any table  ◄── NEW (generic)        │
-│    └─ update_record        → any table  ◄── NEW (generic)        │
+│    ├─ create_record        → any table  ◄── generic              │
+│    ├─ update_record        → any table  ◄── generic              │
+│    ├─ create_business_rule → sys_script         ◄── NEW          │
+│    ├─ create_script_include → sys_script_include ◄── NEW         │
+│    └─ create_client_script → sys_script_client  ◄── NEW          │
 │                                                                  │
 │  RITM work note  ◄── added automatically with AI summary        │
 └──────────────────────────────────────────────────────────────────┘
@@ -122,6 +125,9 @@ snow-super-prompt/
 | `update_user` | Updates an existing `sys_user` record | `email` or `user_name` required to locate |
 | `create_record` | Creates a new record in **any** table | any fields valid for the target table |
 | `update_record` | Updates an existing record in **any** table | `context.sys_id` **or** `context.lookup_field` + `context.lookup_value` required |
+| `create_business_rule` | Creates a new Business Rule (`sys_script`) | `name`, `table_name`, `when` (before/after/async/display), `script`, optional: `action`, `order`, `filter_condition`, `description` |
+| `create_script_include` | Creates a new Script Include (`sys_script_include`) | `name`, `script` (Class.create() pattern), optional: `api_name`, `access` (public/private), `description` |
+| `create_client_script` | Creates a new Client Script (`sys_script_client`) | `name`, `table`, `type` (onLoad/onSubmit/onChange/onCellEdit), `script`, `field_name` required for onChange/onCellEdit |
 
 ---
 
@@ -213,6 +219,78 @@ Omit `sys_id`, `lookup_field`, and `lookup_value` for all other actions.
     "assignment_group": "IT Operations"
   },
   "worknote_summary": "Updated assignment_group to 'IT Operations' on change request CHG0012345."
+}
+```
+
+### Example — Create a Business Rule
+
+```json
+{
+  "operation_details": {
+    "action": "create_business_rule",
+    "target_table": "sys_script"
+  },
+  "context": {
+    "target_record_name": "Auto-set Urgency from Priority"
+  },
+  "payload": {
+    "name": "Auto-set Urgency from Priority",
+    "table_name": "incident",
+    "when": "before",
+    "action": "insert",
+    "active": "true",
+    "order": "100",
+    "description": "Automatically sets urgency to match priority on new incidents.",
+    "script": "(function executeRule(current, previous) {\n    if (current.priority == 1) {\n        current.urgency = 1;\n    }\n})(current, previous);"
+  },
+  "worknote_summary": "Created Business Rule 'Auto-set Urgency from Priority' on the incident table (before insert)."
+}
+```
+
+### Example — Create a Script Include
+
+```json
+{
+  "operation_details": {
+    "action": "create_script_include",
+    "target_table": "sys_script_include"
+  },
+  "context": {
+    "target_record_name": "IncidentUtils"
+  },
+  "payload": {
+    "name": "IncidentUtils",
+    "api_name": "global.IncidentUtils",
+    "active": "true",
+    "access": "public",
+    "description": "Utility methods for incident management.",
+    "script": "var IncidentUtils = Class.create();\nIncidentUtils.prototype = {\n    initialize: function() {},\n\n    getHighPriorityCount: function() {\n        var gr = new GlideAggregate('incident');\n        gr.addQuery('priority', '1');\n        gr.addQuery('active', true);\n        gr.addAggregate('COUNT');\n        gr.query();\n        return gr.next() ? parseInt(gr.getAggregate('COUNT')) : 0;\n    },\n\n    type: 'IncidentUtils'\n};"
+  },
+  "worknote_summary": "Created Script Include 'IncidentUtils' with a public 'getHighPriorityCount' method."
+}
+```
+
+### Example — Create a Client Script
+
+```json
+{
+  "operation_details": {
+    "action": "create_client_script",
+    "target_table": "sys_script_client"
+  },
+  "context": {
+    "target_record_name": "Show Resolution Notes on Resolved"
+  },
+  "payload": {
+    "name": "Show Resolution Notes on Resolved",
+    "table": "incident",
+    "type": "onChange",
+    "field_name": "state",
+    "active": "true",
+    "description": "Makes resolution_notes mandatory when incident state is set to Resolved.",
+    "script": "function onChange(control, oldValue, newValue, isLoading) {\n    if (isLoading) { return; }\n    var isMandatory = (newValue == '6');\n    g_form.setMandatory('resolution_notes', isMandatory);\n    g_form.setVisible('resolution_notes', isMandatory);\n}"
+  },
+  "worknote_summary": "Created onChange Client Script 'Show Resolution Notes on Resolved' on the incident form, watching the state field."
 }
 ```
 
