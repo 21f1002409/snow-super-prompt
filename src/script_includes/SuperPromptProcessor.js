@@ -19,6 +19,14 @@
  *   - create_script_include: Creates a new Script Include (sys_script_include)
  *   - create_client_script : Creates a new Client Script (sys_script_client)
  *
+ * Worknote enrichment:
+ *   After every action the RITM work note receives:
+ *     - The AI-generated summary
+ *     - A "Records Affected" block with a direct link to the record and its
+ *       application scope.  For existing records the scope is read from the
+ *       record itself; for new records it is taken from the optional
+ *       operation_details.scope field in the JSON payload.
+ *
  * @param {string} jsonInput  - Raw JSON string from the catalog variable
  *                              v_json_payload.
  * @param {GlideRecord} ritmGr - The RITM GlideRecord so worknotes can be added.
@@ -108,11 +116,8 @@ SuperPromptProcessor.prototype = {
                     'create_script_include, create_client_script.';
         }
 
-        // Always add the AI-generated worknote summary (or the error message)
-        var noteText = result.success
-            ? data.worknote_summary
-            : 'ERROR: ' + result.message;
-        this._addWorknote(ritmGr, noteText);
+        // Build and add the enriched worknote (summary + record link + scope)
+        this._addWorknote(ritmGr, this._buildWorknote(data, result));
 
         return result;
     },
@@ -155,7 +160,9 @@ SuperPromptProcessor.prototype = {
         return {
             success: true,
             message: 'Variable created successfully (sys_id: ' + sysId + ').',
-            sys_id: sysId
+            sys_id: sysId,
+            table: 'item_option_new',
+            scope: this._getRecordScope('item_option_new', sysId)
         };
     },
 
@@ -198,12 +205,16 @@ SuperPromptProcessor.prototype = {
             };
         }
 
+        var sysId = gr.getUniqueValue();
         this._applyPayload(gr, data.payload);
         gr.update();
 
         return {
             success: true,
-            message: 'Variable "' + variableName + '" updated successfully.'
+            message: 'Variable "' + variableName + '" updated successfully.',
+            sys_id: sysId,
+            table: 'item_option_new',
+            scope: this._getRecordScope('item_option_new', sysId)
         };
     },
 
@@ -224,13 +235,17 @@ SuperPromptProcessor.prototype = {
             };
         }
 
+        var sysId = gr.getUniqueValue();
         this._applyPayload(gr, data.payload);
         gr.update();
 
         return {
             success: true,
             message: 'Catalog item "' + data.context.target_record_name +
-                '" updated successfully.'
+                '" updated successfully.',
+            sys_id: sysId,
+            table: 'sc_cat_item',
+            scope: this._getRecordScope('sc_cat_item', sysId)
         };
     },
 
@@ -240,6 +255,7 @@ SuperPromptProcessor.prototype = {
     _createUser: function (data) {
         var gr = new GlideRecord('sys_user');
         gr.initialize();
+        this._applyScopeToRecord(gr, data);
         this._applyPayload(gr, data.payload);
 
         var sysId = gr.insert();
@@ -255,7 +271,9 @@ SuperPromptProcessor.prototype = {
             success: true,
             message: 'User "' + data.context.target_record_name +
                 '" created successfully (sys_id: ' + sysId + ').',
-            sys_id: sysId
+            sys_id: sysId,
+            table: 'sys_user',
+            scope: this._getRecordScope('sys_user', sysId)
         };
     },
 
@@ -289,13 +307,17 @@ SuperPromptProcessor.prototype = {
             };
         }
 
+        var sysId = gr.getUniqueValue();
         this._applyPayload(gr, data.payload);
         gr.update();
 
         return {
             success: true,
             message: 'User "' + data.context.target_record_name +
-                '" updated successfully.'
+                '" updated successfully.',
+            sys_id: sysId,
+            table: 'sys_user',
+            scope: this._getRecordScope('sys_user', sysId)
         };
     },
 
@@ -314,6 +336,7 @@ SuperPromptProcessor.prototype = {
 
         var gr = new GlideRecord(tableName);
         gr.initialize();
+        this._applyScopeToRecord(gr, data);
         this._applyPayload(gr, data.payload);
 
         var sysId = gr.insert();
@@ -329,7 +352,9 @@ SuperPromptProcessor.prototype = {
             success: true,
             message: 'Record created successfully in table "' + tableName +
                 '" (sys_id: ' + sysId + ').',
-            sys_id: sysId
+            sys_id: sysId,
+            table: tableName,
+            scope: this._getRecordScope(tableName, sysId)
         };
     },
 
@@ -381,13 +406,17 @@ SuperPromptProcessor.prototype = {
             };
         }
 
+        var sysId = gr.getUniqueValue();
         this._applyPayload(gr, data.payload);
         gr.update();
 
         return {
             success: true,
             message: 'Record "' + data.context.target_record_name +
-                '" updated successfully in table "' + tableName + '".'
+                '" updated successfully in table "' + tableName + '".',
+            sys_id: sysId,
+            table: tableName,
+            scope: this._getRecordScope(tableName, sysId)
         };
     },
 
@@ -416,6 +445,7 @@ SuperPromptProcessor.prototype = {
         var gr = new GlideRecord('sys_script');
         gr.initialize();
         this._applyPayload(gr, payload);
+        this._applyScopeToRecord(gr, data);
 
         // Default active to true if not specified
         if (payload.active === undefined) {
@@ -433,7 +463,9 @@ SuperPromptProcessor.prototype = {
         return {
             success: true,
             message: 'Business Rule "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
-            sys_id: sysId
+            sys_id: sysId,
+            table: 'sys_script',
+            scope: this._getRecordScope('sys_script', sysId)
         };
     },
 
@@ -455,6 +487,7 @@ SuperPromptProcessor.prototype = {
         var gr = new GlideRecord('sys_script_include');
         gr.initialize();
         this._applyPayload(gr, payload);
+        this._applyScopeToRecord(gr, data);
 
         // Default api_name to global.<name> convention if not supplied
         if (!payload.api_name) {
@@ -477,7 +510,9 @@ SuperPromptProcessor.prototype = {
         return {
             success: true,
             message: 'Script Include "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
-            sys_id: sysId
+            sys_id: sysId,
+            table: 'sys_script_include',
+            scope: this._getRecordScope('sys_script_include', sysId)
         };
     },
 
@@ -521,6 +556,7 @@ SuperPromptProcessor.prototype = {
         var gr = new GlideRecord('sys_script_client');
         gr.initialize();
         this._applyPayload(gr, payload);
+        this._applyScopeToRecord(gr, data);
 
         // Default active to true if not specified
         if (payload.active === undefined) {
@@ -538,7 +574,9 @@ SuperPromptProcessor.prototype = {
         return {
             success: true,
             message: 'Client Script "' + payload.name + '" created successfully (sys_id: ' + sysId + ').',
-            sys_id: sysId
+            sys_id: sysId,
+            table: 'sys_script_client',
+            scope: this._getRecordScope('sys_script_client', sysId)
         };
     },
 
@@ -608,6 +646,82 @@ SuperPromptProcessor.prototype = {
                 gr.setValue(field, payload[field]);
             }
         }
+    },
+
+    /**
+     * Looks up the application scope of a record and returns the scope string
+     * (e.g. "global", "x_my_app_12345").
+     *
+     * @param {string} table - Table name.
+     * @param {string} sysId - sys_id of the record.
+     * @returns {string} Scope identifier, defaults to "global".
+     */
+    _getRecordScope: function (table, sysId) {
+        try {
+            var gr = new GlideRecord(table);
+            if (!gr.get(sysId)) { return 'global'; }
+            var scopeId = gr.getValue('sys_scope');
+            if (!scopeId) { return 'global'; }
+            var scopeGr = new GlideRecord('sys_scope');
+            if (!scopeGr.get(scopeId)) { return 'global'; }
+            return scopeGr.getValue('scope') || scopeGr.getValue('name') || 'global';
+        } catch (e) {
+            return 'global';
+        }
+    },
+
+    /**
+     * Applies the application scope from operation_details.scope to a new
+     * GlideRecord before it is inserted.  Looks up the scope sys_id by scope
+     * string (e.g. "global", "x_my_app_12345").  No-op if scope is not
+     * provided.
+     *
+     * @param {GlideRecord} gr
+     * @param {object}      data - Parsed JSON payload.
+     */
+    _applyScopeToRecord: function (gr, data) {
+        var scopeName = data.operation_details && data.operation_details.scope
+            ? data.operation_details.scope
+            : null;
+        if (!scopeName) { return; }
+        var scopeGr = new GlideRecord('sys_scope');
+        scopeGr.addQuery('scope', scopeName);
+        scopeGr.setLimit(1);
+        scopeGr.query();
+        if (scopeGr.next()) {
+            gr.setValue('sys_scope', scopeGr.getUniqueValue());
+        }
+    },
+
+    /**
+     * Builds the full work-note text: AI summary + Records Affected block
+     * (record link + scope).
+     *
+     * @param {object} data   - Parsed JSON payload.
+     * @param {object} result - Result from the action handler.
+     * @returns {string}
+     */
+    _buildWorknote: function (data, result) {
+        var lines = [];
+        lines.push(result.success
+            ? data.worknote_summary
+            : 'ERROR: ' + result.message);
+
+        if (result.success && result.sys_id && result.table) {
+            var instanceUrl = (gs.getProperty('glide.servlet.uri') || '').replace(/\/$/, '');
+            var recordUrl = instanceUrl + '/' + result.table + '.do?sys_id=' + result.sys_id;
+            lines.push('');
+            lines.push('Records Affected');
+            lines.push('--------------------------------------------');
+            lines.push('  Action : ' + data.operation_details.action);
+            lines.push('  Record : ' + data.context.target_record_name);
+            lines.push('  Table  : ' + result.table);
+            lines.push('  Scope  : ' + (result.scope || 'global'));
+            lines.push('  Link   : ' + recordUrl);
+            lines.push('--------------------------------------------');
+        }
+
+        return lines.join('\n');
     },
 
     /**
