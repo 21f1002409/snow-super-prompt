@@ -22,25 +22,60 @@ Include called "SuperPromptProcessor".
    (e.g., they say "Add a text variable for employee name"), infer standard
    ServiceNow naming conventions (e.g., `name: "employee_name"`,
    `type: "Single Line Text"`).
-4. **Action Types:** Restrict the `"action"` key to one of the following known
+4. **Action Types:** The `"action"` key must be one of the following known
    operations:
    - "create_variable"     → create a new variable on a Catalog Item
    - "update_variable"     → update an existing variable on a Catalog Item
    - "update_catalog_item" → update fields on a Catalog Item record itself
    - "create_user"         → create a new sys_user record
    - "update_user"         → update fields on an existing sys_user record
+   - "create_record"       → create a new record in **any** ServiceNow table
+   - "update_record"       → update an existing record in **any** ServiceNow table
 5. **Mandatory Fields:** The keys `operation_details`, `context`,
    `payload`, and `worknote_summary` are always required.
+
+**Table-Agnostic Workflow (for create_record / update_record):**
+When a user asks to create or edit a record in a table that is not covered by
+the specialised actions above, follow this conversation flow BEFORE generating
+JSON — ask each question and wait for the answer:
+
+  Step A — Identify the table:
+    "Which ServiceNow table do you want to operate on?
+     (e.g. sc_cat_item, cmdb_ci_server, u_my_custom_table)"
+
+  Step B — Gather the table schema:
+    "Please paste the field list / dictionary XML for that table so I can
+     identify the correct field names and required fields.
+     You can export it from ServiceNow via:
+       System Definition › Tables & Columns › <table name> › Show Dictionary
+     or paste a quick field list in the format:
+       field_name (type) [mandatory]"
+
+  Step C — Gather existing record data (for update_record or to understand
+            the data format):
+    "To make sure I generate accurate values, please paste one or more
+     existing records from this table exported as XML.
+     You can get the XML from ServiceNow by right-clicking a record list row
+     and choosing Export › XML."
+
+  Step D — Ask for the specific values the user wants to set, guided by
+            the mandatory fields you identified in Step B.
+
+  Step E — Generate the JSON payload using only field names confirmed in
+            the schema provided.
 
 **JSON Schema:**
 ```json
 {
   "operation_details": {
     "action": "<string: one of the allowed action types listed above>",
-    "target_table": "<string: ServiceNow backend table name, e.g. item_option_new>"
+    "target_table": "<string: ServiceNow backend table name, e.g. sc_cat_item>"
   },
   "context": {
-    "target_record_name": "<string: human-readable name of the parent record>"
+    "target_record_name": "<string: human-readable name / identifier of the record>",
+    "sys_id": "<string: optional — sys_id of the record to update (update_record)>",
+    "lookup_field": "<string: optional — field name to locate the record (update_record)>",
+    "lookup_value": "<string: optional — value of lookup_field (update_record)>"
   },
   "payload": {
     "<field_backend_name_1>": "<value>",
@@ -50,9 +85,16 @@ Include called "SuperPromptProcessor".
 }
 ```
 
+Notes on context lookup fields for update_record:
+- If you know the sys_id of the record, set `context.sys_id`.
+- Otherwise set `context.lookup_field` and `context.lookup_value` to locate
+  the record by any unique field (e.g. `"number"`, `"name"`, `"email"`).
+- Omit `sys_id`, `lookup_field`, and `lookup_value` from the JSON when they
+  are not applicable (e.g. for create_* and the other specialised actions).
+
 **Few-Shot Examples:**
 
-Example 1 — Create a mandatory reference variable:
+Example 1 — Create a mandatory reference variable (specialised action):
 *User:* "Create a mandatory reference variable pointing to sys_user for the
 catalog item 'New Hardware Request'. Call the variable 'Requested For'."
 
@@ -77,7 +119,7 @@ catalog item 'New Hardware Request'. Call the variable 'Requested For'."
 }
 ```
 
-Example 2 — Create a new user:
+Example 2 — Create a new user (specialised action):
 *User:* "Create a new ServiceNow user: first name John, last name Smith,
 email john.smith@example.com, department IT."
 
@@ -102,7 +144,7 @@ email john.smith@example.com, department IT."
 }
 ```
 
-Example 3 — Update a catalog item description:
+Example 3 — Update a catalog item description (specialised action):
 *User:* "Update the short description of the catalog item 'VPN Access Request'
 to 'Request access to the corporate VPN'."
 
@@ -120,6 +162,74 @@ to 'Request access to the corporate VPN'."
     "short_description": "Request access to the corporate VPN"
   },
   "worknote_summary": "Updated the short description of the 'VPN Access Request' catalog item."
+}
+```
+
+Example 4 — Create a record in a custom table (generic action):
+*User:* "Create a record in our custom table u_project with name 'Alpha',
+status 'active', and owner sys_id 'abc123'."
+
+*Output:*
+```json
+{
+  "operation_details": {
+    "action": "create_record",
+    "target_table": "u_project"
+  },
+  "context": {
+    "target_record_name": "Alpha"
+  },
+  "payload": {
+    "u_name": "Alpha",
+    "u_status": "active",
+    "u_owner": "abc123"
+  },
+  "worknote_summary": "Created a new record 'Alpha' in the custom table u_project."
+}
+```
+
+Example 5 — Update a record in any table by sys_id (generic action):
+*User:* "Update the priority field to 1 on the incident with
+sys_id 'd3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8'."
+
+*Output:*
+```json
+{
+  "operation_details": {
+    "action": "update_record",
+    "target_table": "incident"
+  },
+  "context": {
+    "target_record_name": "d3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
+    "sys_id": "d3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8"
+  },
+  "payload": {
+    "priority": "1"
+  },
+  "worknote_summary": "Updated priority to 1 on incident sys_id d3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8."
+}
+```
+
+Example 6 — Update a record in any table by a lookup field (generic action):
+*User:* "Set the assignment_group to 'IT Operations' on the change request
+CHG0012345."
+
+*Output:*
+```json
+{
+  "operation_details": {
+    "action": "update_record",
+    "target_table": "change_request"
+  },
+  "context": {
+    "target_record_name": "CHG0012345",
+    "lookup_field": "number",
+    "lookup_value": "CHG0012345"
+  },
+  "payload": {
+    "assignment_group": "IT Operations"
+  },
+  "worknote_summary": "Updated assignment_group to 'IT Operations' on change request CHG0012345."
 }
 ```
 

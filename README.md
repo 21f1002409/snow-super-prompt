@@ -23,7 +23,9 @@ automatically performs the requested change and adds a work note to the RITM.
 │                     ServiceNow Instance                          │
 │                                                                  │
 │  Catalog Item: "AI Super Prompt Executor"                        │
-│    └─ Variable: v_json_payload  (multi-line text, mandatory)     │
+│    ├─ Variable: v_json_payload          (mandatory)              │
+│    ├─ Variable: v_table_schema          (optional helper)        │
+│    └─ Variable: v_existing_records_xml  (optional helper)        │
 │                                                                  │
 │  Flow: "AI Super Prompt Executor Flow"  ◄── triggered on submit  │
 │    └─ Script step calls SuperPromptProcessor.process()           │
@@ -33,7 +35,9 @@ automatically performs the requested change and adds a work note to the RITM.
 │    ├─ update_variable      → item_option_new                     │
 │    ├─ update_catalog_item  → sc_cat_item                         │
 │    ├─ create_user          → sys_user                            │
-│    └─ update_user          → sys_user                            │
+│    ├─ update_user          → sys_user                            │
+│    ├─ create_record        → any table  ◄── NEW (generic)        │
+│    └─ update_record        → any table  ◄── NEW (generic)        │
 │                                                                  │
 │  RITM work note  ◄── added automatically with AI summary        │
 └──────────────────────────────────────────────────────────────────┘
@@ -89,11 +93,20 @@ snow-super-prompt/
 1. Tell the AI what change you need, e.g.:
    > *"Create a mandatory single-line text variable called 'Cost Centre' on the
    > catalog item 'New Laptop Request'."*
-2. Copy the JSON it produces.
-3. Open the **AI Super Prompt Executor** catalog item in your ServiceNow
+   >
+   > *"Create a record in our custom table u_project with name 'Alpha'."*
+2. For **generic table operations** (`create_record` / `update_record`) the AI
+   will walk you through a guided conversation:
+   - It asks which table you want to target.
+   - It asks you to paste the table's **field dictionary** (XML or plain list)
+     so it can identify correct field names and required fields.
+   - It asks you to paste **existing records as XML** for format reference.
+   - It then asks for the specific values you want and generates the payload.
+3. Copy the JSON it produces.
+4. Open the **AI Super Prompt Executor** catalog item in your ServiceNow
    Service Portal or Service Catalog.
-4. Paste the JSON into the **JSON Payload** field and click **Submit**.
-5. The flow triggers, the Script Include makes the change, and a work note is
+5. Paste the JSON into the **JSON Payload** field and click **Submit**.
+6. The flow triggers, the Script Include makes the change, and a work note is
    added to the generated RITM.
 
 ---
@@ -107,6 +120,8 @@ snow-super-prompt/
 | `update_catalog_item` | Updates fields on a catalog item record | any `sc_cat_item` field |
 | `create_user` | Creates a new `sys_user` record | `first_name`, `last_name`, `email`, `user_name` |
 | `update_user` | Updates an existing `sys_user` record | `email` or `user_name` required to locate |
+| `create_record` | Creates a new record in **any** table | any fields valid for the target table |
+| `update_record` | Updates an existing record in **any** table | `context.sys_id` **or** `context.lookup_field` + `context.lookup_value` required |
 
 ---
 
@@ -115,11 +130,14 @@ snow-super-prompt/
 ```json
 {
   "operation_details": {
-    "action": "<create_variable | update_variable | update_catalog_item | create_user | update_user>",
+    "action": "<create_variable | update_variable | update_catalog_item | create_user | update_user | create_record | update_record>",
     "target_table": "<ServiceNow backend table name>"
   },
   "context": {
-    "target_record_name": "<human-readable name of the parent record>"
+    "target_record_name": "<human-readable name / identifier of the record>",
+    "sys_id": "<optional — sys_id of the record to update (update_record only)>",
+    "lookup_field": "<optional — field name for record lookup (update_record only)>",
+    "lookup_value": "<optional — value of lookup_field (update_record only)>"
   },
   "payload": {
     "<field_name_1>": "<value_1>",
@@ -128,6 +146,13 @@ snow-super-prompt/
   "worknote_summary": "<professional summary added as a work note on the RITM>"
 }
 ```
+
+For `update_record`, the Script Include resolves the target record in this
+priority order:
+1. `context.sys_id` — direct lookup by sys_id (fastest, most precise).
+2. `context.lookup_field` + `context.lookup_value` — lookup by any unique field.
+
+Omit `sys_id`, `lookup_field`, and `lookup_value` for all other actions.
 
 ### Example — Create a reference variable
 
@@ -148,6 +173,46 @@ snow-super-prompt/
     "mandatory": "true"
   },
   "worknote_summary": "Created a mandatory reference variable 'Requested For' (sys_user) on the 'New Hardware Request' catalog item."
+}
+```
+
+### Example — Create a record in any table (generic)
+
+```json
+{
+  "operation_details": {
+    "action": "create_record",
+    "target_table": "u_project"
+  },
+  "context": {
+    "target_record_name": "Alpha"
+  },
+  "payload": {
+    "u_name": "Alpha",
+    "u_status": "active",
+    "u_owner": "abc123"
+  },
+  "worknote_summary": "Created a new record 'Alpha' in the custom table u_project."
+}
+```
+
+### Example — Update a record in any table by lookup field (generic)
+
+```json
+{
+  "operation_details": {
+    "action": "update_record",
+    "target_table": "change_request"
+  },
+  "context": {
+    "target_record_name": "CHG0012345",
+    "lookup_field": "number",
+    "lookup_value": "CHG0012345"
+  },
+  "payload": {
+    "assignment_group": "IT Operations"
+  },
+  "worknote_summary": "Updated assignment_group to 'IT Operations' on change request CHG0012345."
 }
 ```
 

@@ -13,6 +13,8 @@
  *   - update_catalog_item  : Updates fields on a Catalog Item record
  *   - create_user          : Creates a new sys_user record
  *   - update_user          : Updates fields on an existing sys_user record
+ *   - create_record        : Creates a new record in any table
+ *   - update_record        : Updates an existing record in any table
  *
  * @param {string} jsonInput  - Raw JSON string from the catalog variable
  *                              v_json_payload.
@@ -80,10 +82,17 @@ SuperPromptProcessor.prototype = {
             case 'update_user':
                 result = this._updateUser(data);
                 break;
+            case 'create_record':
+                result = this._createRecord(data);
+                break;
+            case 'update_record':
+                result = this._updateRecord(data);
+                break;
             default:
                 result.message = 'Unknown action: "' + action + '". ' +
                     'Supported actions: create_variable, update_variable, ' +
-                    'update_catalog_item, create_user, update_user.';
+                    'update_catalog_item, create_user, update_user, ' +
+                    'create_record, update_record.';
         }
 
         // Always add the AI-generated worknote summary (or the error message)
@@ -274,6 +283,98 @@ SuperPromptProcessor.prototype = {
             success: true,
             message: 'User "' + data.context.target_record_name +
                 '" updated successfully.'
+        };
+    },
+
+    /**
+     * Creates a new record in any table specified by operation_details.target_table.
+     * All fields to set are supplied in data.payload.
+     */
+    _createRecord: function (data) {
+        var tableName = data.operation_details.target_table;
+        if (!tableName) {
+            return {
+                success: false,
+                message: 'operation_details.target_table is required for create_record.'
+            };
+        }
+
+        var gr = new GlideRecord(tableName);
+        gr.initialize();
+        this._applyPayload(gr, data.payload);
+
+        var sysId = gr.insert();
+        if (!sysId) {
+            return {
+                success: false,
+                message: 'Failed to create record in table "' + tableName +
+                    '" for "' + data.context.target_record_name + '".'
+            };
+        }
+
+        return {
+            success: true,
+            message: 'Record created successfully in table "' + tableName +
+                '" (sys_id: ' + sysId + ').',
+            sys_id: sysId
+        };
+    },
+
+    /**
+     * Updates an existing record in any table specified by
+     * operation_details.target_table.
+     *
+     * Record lookup priority:
+     *   1. context.sys_id       – direct lookup by sys_id
+     *   2. context.lookup_field + context.lookup_value – lookup by arbitrary field
+     */
+    _updateRecord: function (data) {
+        var tableName = data.operation_details.target_table;
+        if (!tableName) {
+            return {
+                success: false,
+                message: 'operation_details.target_table is required for update_record.'
+            };
+        }
+
+        var gr = new GlideRecord(tableName);
+
+        if (data.context.sys_id) {
+            if (!gr.get(data.context.sys_id)) {
+                return {
+                    success: false,
+                    message: 'Record not found in table "' + tableName +
+                        '" with sys_id "' + data.context.sys_id + '".'
+                };
+            }
+        } else if (data.context.lookup_field && data.context.lookup_value !== undefined) {
+            gr.addQuery(data.context.lookup_field, data.context.lookup_value);
+            gr.setLimit(1);
+            gr.query();
+            if (!gr.next()) {
+                return {
+                    success: false,
+                    message: 'Record not found in table "' + tableName +
+                        '" where ' + data.context.lookup_field +
+                        ' = "' + data.context.lookup_value + '".'
+                };
+            }
+        } else {
+            return {
+                success: false,
+                message: 'context.sys_id or (context.lookup_field and ' +
+                    'context.lookup_value) is required to identify the record ' +
+                    'to update in table "' + tableName + '".'
+            };
+        }
+
+        this._applyPayload(gr, data.payload);
+        gr.update();
+
+        return {
+            success: true,
+            message: 'Record "' + data.context.target_record_name +
+                '" updated successfully in table "' + tableName + '".'
         };
     },
 
