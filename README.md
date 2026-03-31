@@ -38,11 +38,11 @@ automatically performs the requested change and adds a work note to the RITM.
 │    ├─ update_user          → sys_user                            │
 │    ├─ create_record        → any table  ◄── generic              │
 │    ├─ update_record        → any table  ◄── generic              │
-│    ├─ create_business_rule → sys_script         ◄── NEW          │
-│    ├─ create_script_include → sys_script_include ◄── NEW         │
-│    └─ create_client_script → sys_script_client  ◄── NEW          │
+│    ├─ create_business_rule → sys_script                          │
+│    ├─ create_script_include → sys_script_include                 │
+│    └─ create_client_script → sys_script_client                   │
 │                                                                  │
-│  RITM work note  ◄── added automatically with AI summary        │
+│  RITM work note ◄── AI summary + links to ALL records affected   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,6 +55,8 @@ snow-super-prompt/
 ├── super_prompt.txt                          ← AI system prompt (paste into chatbot)
 ├── update_set/
 │   └── snow_super_prompt_update_set.xml      ← Single importable ServiceNow Update Set
+├── scripts/
+│   └── deploy_via_table_api.py               ← Alternative: deploy via REST Table API
 └── src/                                      ← Individual source files (reference)
     ├── script_includes/
     │   └── SuperPromptProcessor.js
@@ -68,7 +70,7 @@ snow-super-prompt/
 
 ## Quick-Start Guide
 
-### Step 1 — Import the Update Set
+### Option A — Import the Update Set *(recommended)*
 
 1. Log in to your ServiceNow instance as an **administrator**.
 2. Navigate to **System Update Sets › Retrieved Update Sets**.
@@ -77,7 +79,42 @@ snow-super-prompt/
 4. Open the newly created update set, click **Preview Update Set**, resolve any
    conflicts, then click **Commit Update Set**.
 
-### Step 2 — Post-import configuration
+### Option B — Deploy directly via Table API *(if the update set import fails)*
+
+Use the bundled Python script to create or update every component directly in
+the instance without touching update sets.
+
+```bash
+# Install the only dependency
+pip install requests
+
+# Deploy using CLI flags
+python scripts/deploy_via_table_api.py \
+    --instance  https://dev12345.service-now.com \
+    --username  admin \
+    --password  <password>
+
+# Or use environment variables
+export SN_INSTANCE=https://dev12345.service-now.com
+export SN_USERNAME=admin
+export SN_PASSWORD=<password>
+python scripts/deploy_via_table_api.py
+
+# Preview what would happen without making any changes
+python scripts/deploy_via_table_api.py --dry-run
+
+# Target a specific application scope
+python scripts/deploy_via_table_api.py --scope x_my_app_12345
+```
+
+The script creates or updates:
+- The **SuperPromptProcessor** Script Include (`sys_script_include`)
+- The **AI Super Prompt Executor** Catalog Item (`sc_cat_item`)
+- All three catalog variables (`item_option_new`)
+
+At the end it prints a summary with a direct link to each record.
+
+### Step 2 — Post-deployment configuration
 
 | Task | Where |
 |------|-------|
@@ -98,19 +135,25 @@ snow-super-prompt/
    > catalog item 'New Laptop Request'."*
    >
    > *"Create a record in our custom table u_project with name 'Alpha'."*
-2. For **generic table operations** (`create_record` / `update_record`) the AI
+   >
+   > *"Create a Script Include called 'ProjectUtils' and a Business Rule
+   > 'Set Project Active' on u_project."*
+2. For **create_*** actions the AI will ask which **application scope** the new
+   record should belong to (e.g. `global` or `x_my_app_12345`).  Press Enter
+   to keep the default (`global`).
+3. For **generic table operations** (`create_record` / `update_record`) the AI
    will walk you through a guided conversation:
    - It asks which table you want to target.
    - It asks you to paste the table's **field dictionary** (XML or plain list)
      so it can identify correct field names and required fields.
    - It asks you to paste **existing records as XML** for format reference.
    - It then asks for the specific values you want and generates the payload.
-3. Copy the JSON it produces.
-4. Open the **AI Super Prompt Executor** catalog item in your ServiceNow
+4. Copy the JSON it produces.
+5. Open the **AI Super Prompt Executor** catalog item in your ServiceNow
    Service Portal or Service Catalog.
-5. Paste the JSON into the **JSON Payload** field and click **Submit**.
-6. The flow triggers, the Script Include makes the change, and a work note is
-   added to the generated RITM.
+6. Paste the JSON into the **JSON Payload** field and click **Submit**.
+7. The flow triggers, the Script Include makes the change, and a work note is
+   added to the generated RITM with links to **every record affected**.
 
 ---
 
@@ -133,11 +176,14 @@ snow-super-prompt/
 
 ## JSON Schema Reference
 
+### Single Operation
+
 ```json
 {
   "operation_details": {
-    "action": "<create_variable | update_variable | update_catalog_item | create_user | update_user | create_record | update_record>",
-    "target_table": "<ServiceNow backend table name>"
+    "action": "<create_variable | update_variable | update_catalog_item | create_user | update_user | create_record | update_record | create_business_rule | create_script_include | create_client_script>",
+    "target_table": "<ServiceNow backend table name>",
+    "scope": "<optional — application scope for NEW records, e.g. global or x_my_app_12345>"
   },
   "context": {
     "target_record_name": "<human-readable name / identifier of the record>",
@@ -152,6 +198,35 @@ snow-super-prompt/
   "worknote_summary": "<professional summary added as a work note on the RITM>"
 }
 ```
+
+### Batch Mode (multiple records in one submission)
+
+```json
+{
+  "operations": [
+    {
+      "operation_details": { "action": "<action1>", "target_table": "<table1>", "scope": "<optional>" },
+      "context": { "target_record_name": "<name1>" },
+      "payload": { "<field>": "<value>" },
+      "worknote_summary": "<per-operation summary>"
+    },
+    {
+      "operation_details": { "action": "<action2>", "target_table": "<table2>" },
+      "context": { "target_record_name": "<name2>" },
+      "payload": { "<field>": "<value>" },
+      "worknote_summary": "<per-operation summary>"
+    }
+  ],
+  "worknote_summary": "<overall batch summary added to the RITM work note>"
+}
+```
+
+### Scope handling
+
+| Record type | How scope is resolved |
+|---|---|
+| **New record** (`create_*`) | From `operation_details.scope` if provided; otherwise defaults to the instance default scope (usually `global`). |
+| **Existing record** (`update_*`) | Read directly from the record's `sys_scope` field — no override. |
 
 For `update_record`, the Script Include resolves the target record in this
 priority order:
@@ -188,7 +263,8 @@ Omit `sys_id`, `lookup_field`, and `lookup_value` for all other actions.
 {
   "operation_details": {
     "action": "create_record",
-    "target_table": "u_project"
+    "target_table": "u_project",
+    "scope": "x_my_app_12345"
   },
   "context": {
     "target_record_name": "Alpha"
@@ -198,7 +274,7 @@ Omit `sys_id`, `lookup_field`, and `lookup_value` for all other actions.
     "u_status": "active",
     "u_owner": "abc123"
   },
-  "worknote_summary": "Created a new record 'Alpha' in the custom table u_project."
+  "worknote_summary": "Created a new record 'Alpha' in the custom table u_project (scope: x_my_app_12345)."
 }
 ```
 
@@ -219,6 +295,50 @@ Omit `sys_id`, `lookup_field`, and `lookup_value` for all other actions.
     "assignment_group": "IT Operations"
   },
   "worknote_summary": "Updated assignment_group to 'IT Operations' on change request CHG0012345."
+}
+```
+
+### Example — Batch (two records in one payload)
+
+```json
+{
+  "operations": [
+    {
+      "operation_details": {
+        "action": "create_script_include",
+        "target_table": "sys_script_include"
+      },
+      "context": { "target_record_name": "ProjectUtils" },
+      "payload": {
+        "name": "ProjectUtils",
+        "api_name": "global.ProjectUtils",
+        "active": "true",
+        "access": "public",
+        "description": "Utility methods for project management.",
+        "script": "var ProjectUtils = Class.create();\nProjectUtils.prototype = {\n    initialize: function() {},\n    type: 'ProjectUtils'\n};"
+      },
+      "worknote_summary": "Created Script Include 'ProjectUtils'."
+    },
+    {
+      "operation_details": {
+        "action": "create_business_rule",
+        "target_table": "sys_script"
+      },
+      "context": { "target_record_name": "Set Project Active" },
+      "payload": {
+        "name": "Set Project Active",
+        "table_name": "u_project",
+        "when": "before",
+        "action": "insert",
+        "active": "true",
+        "order": "100",
+        "description": "Sets u_status to active on new project records.",
+        "script": "(function executeRule(current, previous) {\n    current.u_status = 'active';\n})(current, previous);"
+      },
+      "worknote_summary": "Created Business Rule 'Set Project Active' on u_project (before insert)."
+    }
+  ],
+  "worknote_summary": "Batch: Created Script Include 'ProjectUtils' and Business Rule 'Set Project Active' on u_project."
 }
 ```
 
@@ -303,19 +423,47 @@ Omit `sys_id`, `lookup_field`, and `lookup_value` for all other actions.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `process` | `process(jsonInput, ritmGr)` | Main entry point. Parses JSON, validates schema, dispatches to the correct handler, and adds a work note. Returns `{ success, message }`. |
+| `process` | `process(jsonInput, ritmGr)` | Main entry point. Parses JSON (single-op or batch), validates schema, dispatches to the correct handler(s), and adds an enriched work note listing all records affected. Returns `{ success, message }`. |
+| `_processBatch` | `_processBatch(data, ritmGr)` | Internal. Iterates over the `operations` array, dispatches each, collects results, and writes one combined worknote. |
+| `_dispatchAction` | `_dispatchAction(data)` | Internal. Routes a single validated operation to the correct handler. |
+| `_buildWorknote` | `_buildWorknote(data, results)` | Internal. Builds the work note text: summary + "Records Affected" block with a direct link and scope for every record. |
 
 All GlideRecord operations use `setValue` so that field-level ACLs and
 business rules are respected in the same way as a manual update.
+
+### Worknote format
+
+Every RITM work note produced by SuperPromptProcessor follows this structure:
+
+```
+[AI Super Prompt] <worknote_summary from the JSON>
+
+Records Affected (N)
+============================================
+  [1] Action : create_script_include
+      Record : ProjectUtils
+      Table  : sys_script_include
+      Scope  : global
+      Link   : https://dev12345.service-now.com/sys_script_include.do?sys_id=xxx
+  --------------------------------------------
+  [2] Action : create_business_rule
+      Record : Set Project Active
+      Table  : sys_script
+      Scope  : global
+      Link   : https://dev12345.service-now.com/sys_script.do?sys_id=yyy
+============================================
+```
 
 ---
 
 ## Extending with New Actions
 
 1. Add the new `action` string to `super_prompt.txt` under "Action Types".
-2. Add a new `case` in `SuperPromptProcessor.prototype.process`.
-3. Implement the handler method following the same pattern as the existing ones.
-4. Export a new Update Set from your dev instance and replace
+2. Add a new `case` in `SuperPromptProcessor._dispatchAction`.
+3. Implement the handler method following the same pattern as the existing ones
+   (return `{ success, message, sys_id, table, scope }`).
+4. Re-run `python scripts/deploy_via_table_api.py` to push the updated Script
+   Include to the instance, **or** export a new Update Set and replace
    `update_set/snow_super_prompt_update_set.xml`.
 
 ---
