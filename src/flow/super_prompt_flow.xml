@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ServiceNow Flow Designer — Subflow/Flow Definition
+  Name   : AI Super Prompt Executor Flow
+  Trigger: Record Created — sc_task (RITM) where cat_item = "AI Super Prompt Executor"
+  Purpose: Reads v_json_payload from the submitted RITM, passes it to the
+           SuperPromptProcessor Script Include, and handles success / error
+           outcomes.
+
+  NOTE: ServiceNow Flow Designer flows are typically exported as XML via the
+  "Export" option inside Studio or via an Update Set.  The XML structure below
+  mirrors the format produced by a ServiceNow instance export and can be
+  imported via System Update Sets > Import XML.
+
+  Import Method:
+    Import the bundled update set (update_set/snow_super_prompt_update_set.xml).
+    That file includes this flow as well as the Script Include and Catalog Item.
+-->
+<record_update table="sys_hub_flow">
+  <sys_hub_flow action="INSERT_OR_UPDATE">
+    <access>public</access>
+    <active>true</active>
+    <description>Processes the AI-generated JSON payload submitted via the
+"AI Super Prompt Executor" catalog item.  Calls the SuperPromptProcessor
+Script Include to perform the requested ServiceNow admin action and adds a
+work note to the RITM.</description>
+    <label>AI Super Prompt Executor Flow</label>
+    <master>true</master>
+    <name>ai_super_prompt_executor_flow</name>
+    <remote_trigger_table>sc_req_item</remote_trigger_table>
+    <run_as>system</run_as>
+    <sys_name>AI Super Prompt Executor Flow</sys_name>
+    <trigger_type>record</trigger_type>
+
+    <!--
+      Trigger configuration:
+        Table  : sc_req_item
+        When   : Created
+        Filter : cat_item.name = "AI Super Prompt Executor"
+    -->
+    <trigger_node action="INSERT_OR_UPDATE">
+      <label>Trigger — RITM Created</label>
+      <type>RECORD_CREATED</type>
+      <table>sc_req_item</table>
+      <filter_conditions>
+        <condition field="cat_item.name"
+                   operator="CONTAINS"
+                   value="AI Super Prompt Executor"/>
+      </filter_conditions>
+    </trigger_node>
+
+    <!--
+      Step 1: Run Script
+        Retrieves the JSON payload from the RITM variable v_json_payload,
+        instantiates SuperPromptProcessor, and calls process().
+        The script captures the result object so subsequent steps can
+        branch on success / failure.
+    -->
+    <flow_node action="INSERT_OR_UPDATE">
+      <label>Run SuperPromptProcessor</label>
+      <order>10</order>
+      <type>script</type>
+      <script><![CDATA[
+(function execute(inputs, outputs) {
+
+    var jsonPayload = inputs.ritm_record.getVariablePoolValue('v_json_payload') + '';
+
+    // Retrieve the RITM GlideRecord so the Script Include can add worknotes.
+    var ritmGr = new GlideRecord('sc_req_item');
+    if (!ritmGr.get(inputs.ritm_record.sys_id + '')) {
+        outputs.success   = 'false';
+        outputs.result_message = 'Could not load RITM record.';
+        return;
+    }
+
+    var processor = new SuperPromptProcessor();
+    var result    = processor.process(jsonPayload, ritmGr);
+
+    outputs.success        = result.success ? 'true' : 'false';
+    outputs.result_message = result.message || '';
+
+})(inputs, outputs);
+      ]]></script>
+      <inputs>
+        <input name="ritm_record" type="GlideRecord(sc_req_item)"
+               label="RITM Record" source="trigger"/>
+      </inputs>
+      <outputs>
+        <output name="success"        type="string" label="Success Flag"/>
+        <output name="result_message" type="string" label="Result Message"/>
+      </outputs>
+    </flow_node>
+
+    <!--
+      Step 2a (Success path): Update RITM state to Closed Complete
+    -->
+    <flow_node action="INSERT_OR_UPDATE">
+      <label>Close RITM — Completed</label>
+      <order>20</order>
+      <type>update_record</type>
+      <condition>
+        <field>outputs.Run SuperPromptProcessor.success</field>
+        <operator>is</operator>
+        <value>true</value>
+      </condition>
+      <table>sc_req_item</table>
+      <record_source>trigger</record_source>
+      <field_values>
+        <field_value field="state"             value="3"/>
+        <!-- 3 = Closed Complete -->
+        <field_value field="close_notes"
+                     value="AI Super Prompt task completed successfully."/>
+      </field_values>
+    </flow_node>
+
+    <!--
+      Step 2b (Failure path): Update RITM state to Closed Incomplete
+                               and add error work note
+    -->
+    <flow_node action="INSERT_OR_UPDATE">
+      <label>Close RITM — Error</label>
+      <order>21</order>
+      <type>update_record</type>
+      <condition>
+        <field>outputs.Run SuperPromptProcessor.success</field>
+        <operator>is</operator>
+        <value>false</value>
+      </condition>
+      <table>sc_req_item</table>
+      <record_source>trigger</record_source>
+      <field_values>
+        <field_value field="state"
+                     value="4"/>
+        <!-- 4 = Closed Incomplete -->
+        <field_value field="close_notes"
+                     value="AI Super Prompt task failed. See work notes for details."/>
+        <field_value field="work_notes"
+                     value="[AI Super Prompt] FAILED: {{outputs.Run SuperPromptProcessor.result_message}}"/>
+      </field_values>
+    </flow_node>
+
+  </sys_hub_flow>
+</record_update>
